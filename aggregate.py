@@ -1,9 +1,8 @@
 import argparse
-import csv
 import json
 import logging
-from collections import defaultdict
-from typing import Any
+
+import pandas as pd
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 def aggregate_contributions(file_path):
     """
-    Parse a CSV file containing Michigan PAC contribution data and aggregate
+    Parse an Excel file containing Michigan PAC contribution data and aggregate
     contributions by receiving committee.
 
     Args:
-        file_path (str): Path to the CSV file to parse.
+        file_path (str): Path to the Excel (.xlsx) file to parse.
 
     Returns:
         str: JSON string containing aggregated data sorted by total contribution
@@ -26,50 +25,49 @@ def aggregate_contributions(file_path):
              - committee_name: The receiving committee name
              - total_amount: Sum of all contributions to that committee
              - count: Number of contributions to that committee
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        ValueError: If required columns are missing from the spreadsheet.
     """
-    aggregated = defaultdict[Any, dict[str, float | int]](lambda: {"total_amount": 0.0, "count": 0})
-    skipped_rows = 0
-    row_number = 0
+    logger.info(f"Loading Excel file: {file_path}")
+    df = pd.read_excel(file_path)
 
-    with open(file_path, "r", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
+    if "Receiving Committee Name" not in df.columns:
+        raise ValueError("Required column 'Receiving Committee Name' not found in the spreadsheet")
 
-        if reader.fieldnames is None:
-            raise ValueError("CSV file is empty or cannot be read")
-        if "Receiving Committee Name" not in reader.fieldnames:
-            raise ValueError("Required column 'Receiving Committee Name' not found in CSV")
-        if "Amount of Contribution" not in reader.fieldnames:
-            raise ValueError("Required column 'Amount of Contribution' not found in CSV")
+    if "Amount of Contribution" not in df.columns:
+        raise ValueError("Required column 'Amount of Contribution' not found in the spreadsheet")
 
-        for row in reader:
-            row_number += 1
-            committee_name = row.get("Receiving Committee Name", "").strip()
-            amount_str = row.get("Amount of Contribution", "").strip()
+    initial_rows = len(df)
+    rows_with_missing_committee = df["Receiving Committee Name"].isna().sum() + (
+        df["Receiving Committee Name"] == ""
+    ).sum()
+    if rows_with_missing_committee > 0:
+        logger.warning(f"Found {rows_with_missing_committee} rows with missing or empty 'Receiving Committee Name'")
 
-            if not committee_name:
-                logger.warning(f"Row {row_number}: Skipped due to missing or empty 'Receiving Committee Name'")
-                skipped_rows += 1
-                continue
-
-            amount = float(amount_str) if amount_str else 0.0
-
-            aggregated[committee_name]["total_amount"] += amount
-            aggregated[committee_name]["count"] += 1
-
+    df = df.dropna(subset=["Receiving Committee Name"])
+    df = df[df["Receiving Committee Name"] != ""]
+    skipped_rows = initial_rows - len(df)
     if skipped_rows > 0:
-        logger.warning(f"Total rows skipped: {skipped_rows}")
-    logger.info(f"Successfully processed {row_number - skipped_rows} rows")
+        logger.warning(f"Skipped {skipped_rows} rows due to missing committee names")
 
-    result = [
-        {
-            "committee_name": committee_name,
-            "total_amount": data["total_amount"],
-            "count": data["count"],
-        }
-        for committee_name, data in aggregated.items()
-    ]
+    aggregated = (
+        df.groupby("Receiving Committee Name")
+        .agg(
+            total_amount=("Amount of Contribution", "sum"),
+            count=("Amount of Contribution", "count"),
+        )
+        .reset_index()
+    )
 
-    result.sort(key=lambda x: x["total_amount"], reverse=True)
+    aggregated.columns = ["committee_name", "total_amount", "count"]
+
+    aggregated = aggregated.sort_values("total_amount", ascending=False)
+
+    result = aggregated.to_dict(orient="records")
+
+    logger.info(f"Successfully processed {len(df)} rows into {len(result)} committees")
 
     return json.dumps(result)
 
@@ -81,8 +79,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "file_path",
         nargs="?",
-        default="downloads/contribution.csv",
-        help="Path to the CSV file containing contribution data. Default: 'downloads/contribution.csv'",
+        default="downloads/contributions.xlsx",
+        help="Path to the Excel file containing contribution data. Default: 'downloads/contributions.xlsx'",
     )
     parser.add_argument(
         "--verbose",
