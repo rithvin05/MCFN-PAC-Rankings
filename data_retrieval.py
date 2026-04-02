@@ -24,6 +24,8 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+EXCEL_SIGNATURES = (b"PK", b"\xD0\xCF\x11\xE0")
+
 
 def _parse_date(value: str | date, label: str) -> date:
     if isinstance(value, date):
@@ -36,7 +38,6 @@ def _parse_date(value: str | date, label: str) -> date:
         ) from exc
 
 
-
 def _normalize_amount(value: Optional[int | float | str]) -> str:
     if value is None or value == "":
         return ""
@@ -45,7 +46,6 @@ def _normalize_amount(value: Optional[int | float | str]) -> str:
             return str(value)
         return f"{int(value):,}"
     return str(value)
-
 
 
 def _validate_inputs(
@@ -74,7 +74,6 @@ def _validate_inputs(
     return start, end
 
 
-
 def _build_payload(
     start: date,
     end: date,
@@ -84,12 +83,13 @@ def _build_payload(
     contribution_type: str = "",
     contributor_name: str = "",
     committee_name: str = "",
+    committee_type: str = "",
     schedule_type: str = "181",
 ) -> dict[str, str]:
     return {
         "form.committeeName": committee_name,
         "form.committeeId": "",
-        "form.committeeType": "",
+        "form.committeeType": committee_type,
         "form.committeeCandidateLastName": "",
         "form.committeeOfficeTitle": "",
         "form.committeePoliticalParty": "",
@@ -116,9 +116,9 @@ def _build_payload(
     }
 
 
-
 def _detect_server_error(resp: requests.Response) -> Optional[str]:
     content_type = resp.headers.get("content-type", "").lower()
+
     if any(text_type in content_type for text_type in ("text/", "json", "html")):
         body = resp.text.lower()
 
@@ -130,8 +130,17 @@ def _detect_server_error(resp: requests.Response) -> Optional[str]:
         if "no records" in body or "no results" in body:
             return "The query completed, but no records were returned."
         return "The server returned text/HTML instead of an Excel file."
+
     return None
 
+
+def _looks_like_excel(file_path: str) -> bool:
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(8)
+        return any(header.startswith(sig) for sig in EXCEL_SIGNATURES)
+    except OSError:
+        return False
 
 
 def fetch_contributions_export(
@@ -143,6 +152,7 @@ def fetch_contributions_export(
     contribution_type: str = "",
     contributor_name: str = "",
     committee_name: str = "",
+    committee_type: str = "",
     schedule_type: str = "181",
     out_dir: str = DOWNLOAD_DIR,
     out_name: Optional[str] = None,
@@ -167,35 +177,58 @@ def fetch_contributions_export(
         contribution_type=contribution_type,
         contributor_name=contributor_name,
         committee_name=committee_name,
+        committee_type=committee_type,
         schedule_type=schedule_type,
     )
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "contributions.xlsx")
+    filename = out_name or "contributions.xlsx"
+    out_path = os.path.join(out_dir, filename)
 
     try:
         with requests.Session() as session:
             seed_url = f"{BASE_URL}?page={SEARCH_PAGE}"
-            seed_resp = session.get(seed_url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
+            seed_resp = session.get(seed_url, headers=HEADERS, timeout=30)
             seed_resp.raise_for_status()
 
-            with session.post(EXPORT_URL, data=payload, headers=HEADERS, stream=True, timeout=timeout) as resp:
+            with session.post(
+                EXPORT_URL,
+                data=payload,
+                headers=HEADERS,
+                stream=True,
+                timeout=timeout,
+            ) as resp:
                 print(f"POST status: {resp.status_code}")
                 resp.raise_for_status()
 
                 error_message = _detect_server_error(resp)
                 if error_message:
                     print(f"Fetch failed: {error_message}")
-                    preview = resp.text[:500].strip()
-                    if preview:
-                        print("Response preview:")
-                        print(preview)
+                    try:
+                        preview = resp.text[:800].strip()
+                        if preview:
+                            print("Response preview:")
+                            print(preview)
+                    except Exception:
+                        pass
                     return None
 
                 with open(out_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+
+        if not _looks_like_excel(out_path):
+            print("Fetch failed: downloaded file does not appear to be a valid Excel file.")
+            try:
+                with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                    preview = f.read(800).strip()
+                if preview:
+                    print("Downloaded file preview:")
+                    print(preview)
+            except Exception:
+                pass
+            return None
 
         print(f"Saved: {out_path}")
         return out_path
@@ -213,9 +246,8 @@ def fetch_contributions_export(
 
 if __name__ == "__main__":
     fetch_contributions_export(
-        start_date="2026-01-01",
+        start_date="2025-12-01",
         end_date="2026-01-31",
-        min_amount=1000,
-        contribution_type="individual",
+        committee_type="16",
         schedule_type="181",
     )
